@@ -1,0 +1,227 @@
+---
+title: 'Implementation Guide'
+description: 'Step-by-step guide to implement the greenhouse monitoring system in Python'
+---
+
+## Prerequisites
+
+Make sure you have Python 3.7+ installed and the following packages:
+
+```bash
+pip install fastapi uvicorn paho-mqtt python-dotenv adafruit-circuitpython-dht
+```
+
+## Project Structure
+
+Create the following directory structure in your project:
+
+```bash
+greenhouse-monitor/
+├── .env                    # Environment variables
+├── main.py                 # Main application file
+├── config/
+│   └── mqtt_broker.py      # MQTT configuration
+└── services/
+    └── climate_service.py  # Sensor service
+```
+
+## Step 1: Environment Setup
+
+Create a `.env` file in your project root:
+
+```env
+GREENHOUSE_ID=your_greenhouse_id
+MQTT_BROKER=localhost
+MQTT_PORT=1883
+MQTT_TOPIC=greenhouse/${GREENHOUSE_ID}/data
+```
+
+## Step 2: MQTT Configuration
+
+Create `config/mqtt_broker.py`:
+
+```python
+import paho.mqtt.client as mqtt
+import json
+import os
+from dotenv import load_dotenv
+
+class MqttConfig:
+    def __init__(self):
+        load_dotenv()
+        self.client = mqtt.Client()
+        self.port = int(os.getenv('MQTT_PORT'))
+        self.broker = os.getenv('MQTT_BROKER')
+        self.topic = os.getenv('MQTT_TOPIC')
+        
+        # Set up callbacks
+        self.client.on_connect = self.on_connect
+        self.client.on_publish = self.on_publish
+        
+    def on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            print("Connected to MQTT Broker!")
+        else:
+            print(f"Failed to connect, return code {rc}")
+            
+    def on_publish(self, client, userdata, mid):
+        print(f"Message {mid} published")
+        
+    def connect(self):
+        self.client.connect(self.broker, self.port, 60)
+        
+    def start_loop(self):
+        self.client.loop_start()
+        
+    def publish(self, topic, data):
+        self.client.publish(topic, json.dumps(data))
+```
+
+## Step 3: Climate Service
+
+Create `services/climate_service.py`:
+
+```python
+import adafruit_dht
+import board
+import time
+
+class ClimateMonitor:
+    def __init__(self, pin=board.D4, sensor_type=adafruit_dht.DHT11):
+        self.DHT_SENSOR = sensor_type(pin)
+        
+    def read_temperature(self):
+        try:
+            return self.DHT_SENSOR.temperature
+        except RuntimeError as error:
+            print(f"Temperature read error: {error}")
+            return None
+            
+    def read_humidity(self):
+        try:
+            return self.DHT_SENSOR.humidity
+        except RuntimeError as error:
+            print(f"Humidity read error: {error}")
+            return None
+            
+    def cleanup(self):
+        self.DHT_SENSOR.exit()
+```
+
+## Step 4: Main Application
+
+Create `main.py`:
+
+```python
+from fastapi import FastAPI, BackgroundTasks
+import time
+import os
+from dotenv import load_dotenv
+
+from config.mqtt_broker import MqttConfig
+from services.climate_service import ClimateMonitor
+
+# Load environment variables
+load_dotenv()
+
+app = FastAPI()
+mqtt = MqttConfig()
+mqtt.connect()
+mqtt.start_loop()
+
+def read_and_publish_sensor_data():
+    """Function to continuously read sensor data and publish it via MQTT."""
+    collector = ClimateMonitor()
+
+    while True:
+        try:
+            temperature = collector.read_temperature()
+            humidity = collector.read_humidity()
+
+            if temperature is not None and humidity is not None:
+                data = {
+                    "greenhouseId": os.getenv('GREENHOUSE_ID'),
+                    "temperature": temperature,
+                    "humidity": humidity,
+                    "timestamp": int(time.time())
+                }
+
+                mqtt.publish(os.getenv('MQTT_TOPIC'), data)
+                print(f"Published: {data}")
+                
+        except Exception as error:
+            print(f"Unexpected error: {error}")
+            collector.cleanup()
+            break
+
+        time.sleep(2)  # Read every 2 seconds
+
+@app.get("/start")
+def start_monitoring(background_tasks: BackgroundTasks):
+    """Start the sensor data collection in the background."""
+    background_tasks.add_task(read_and_publish_sensor_data)
+    return {"message": "Sensor monitoring started"}
+
+@app.get("/stop")
+def stop_monitoring():
+    """Stop the sensor data collection."""
+    # Note: This is a simple implementation. In a real application,
+    # you would need a way to signal the background task to stop.
+    return {"message": "Sensor monitoring stopped"}
+```
+
+## Step 5: Running the Application
+
+1. Start the FastAPI server:
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+2. Start the monitoring by making a GET request:
+```bash
+curl http://localhost:8000/start
+```
+
+3. Monitor the MQTT messages:
+```bash
+mosquitto_sub -h localhost -t "greenhouse/+/data" -v
+```
+
+## Step 6: Testing the Implementation
+
+1. Verify the sensor readings:
+   - Check the terminal output for published messages
+   - Verify the MQTT subscriber receives the messages
+   - Check the data format matches the expected JSON structure
+
+2. Monitor for errors:
+   - Watch for any sensor read errors
+   - Check MQTT connection status
+   - Verify the background task is running
+
+## Troubleshooting
+
+Common issues and solutions:
+
+1. **Sensor Not Found**
+   - Check GPIO pin connections
+   - Verify the sensor is properly powered
+   - Try a different GPIO pin
+
+2. **MQTT Connection Issues**
+   - Verify the broker is running
+   - Check network connectivity
+   - Verify port and broker address
+
+3. **Permission Errors**
+   - Run with sudo if needed
+   - Check GPIO permissions
+   - Verify file permissions
+
+## Next Steps
+
+1. Add error handling and retry mechanisms
+2. Implement data validation
+3. Add authentication for MQTT
+4. Set up data storage
+5. Create a monitoring dashboard 
